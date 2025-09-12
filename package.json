@@ -1,0 +1,25 @@
+{
+  "name": "video-meet",
+  "version": "1.0.0",
+  "description": "Google Meet-like video chat application",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "cd server && npm run dev",
+    "client": "cd client && npm run dev",
+    "build": "cd client && npm run build",
+    "start": "cd server && npm start"
+  },
+  "keywords": [
+    "video",
+    "chat",
+    "webrtc",
+    "socket.io",
+    "react"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
