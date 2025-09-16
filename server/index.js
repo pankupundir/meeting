@@ -7,48 +7,14 @@ const cron = require('node-cron');
 
 const app = express();
 const server = http.createServer(app);
-// Configure allowed origins for production and development
-const allowedOrigins = [
-  'https://meeting-sooty.vercel.app', // Your frontend domain
-  'https://www.meeting-sooty.vercel.app', // With www
-  'http://localhost:5173', // Vite dev server
-  'http://localhost:3000', // Alternative dev port
-  process.env.CLIENT_URL, // Environment variable for client URL
-  process.env.FRONTEND_URL // Alternative environment variable
-].filter(Boolean); // Remove undefined values
-
-// Log allowed origins for debugging
-console.log('Allowed CORS origins:', allowedOrigins);
-
 const io = socketIo(server, {
   cors: {
-    origin: allowedOrigins,
-    methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true,
-    transports: ["websocket", "polling"],
-    preflightContinue: false,
-    optionsSuccessStatus: 204
+    origin: "https://meeting-sooty.vercel.app",
+    methods: ["GET", "POST"]
   }
 });
 
-// Configure CORS for Express
-app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      console.log('CORS blocked origin:', origin);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(cors());
 app.use(express.json());
 
 // Store active meetings and scheduled meetings
