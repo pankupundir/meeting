@@ -9,20 +9,18 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: "https://meeting-sooty.vercel.app",
+    origin:  "*" ,
     methods: ["GET", "POST"],
     allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true,
-    transports: ["websocket", "polling"],
-    preflightContinue: false,
-    optionsSuccessStatus: 204,
-    maxAge: 86400,
-    origin: "https://meeting-sooty.vercel.app"
-    
+    credentials: false,
+    transports: ["websocket", "polling"]
   }
 });
 
-app.use(cors());
+app.use(cors({
+  origin:  "*" ,
+  credentials:false
+}));
 app.use(express.json());
 
 // Store active meetings and scheduled meetings
