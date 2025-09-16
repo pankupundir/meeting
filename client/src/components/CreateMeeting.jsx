@@ -27,7 +27,8 @@ const CreateMeeting = () => {
     setIsCreating(true);
 
     try {
-      const response = await fetch('https://meeting-sooty.vercel.app/api/meetings', {
+      const serverUrl = "https://meeting-sooty.vercel.app" || 'http://localhost:3001';
+      const response = await fetch(`${serverUrl}/api/meetings`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

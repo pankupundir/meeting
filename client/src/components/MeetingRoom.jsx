@@ -60,7 +60,14 @@ const MeetingRoom = () => {
 
   useEffect(() => {
     // Initialize socket connection
-    const newSocket = io('https://meeting-sooty.vercel.app');
+    // Use environment variable or fallback to localhost for development
+    const serverUrl = "https://meeting-sooty.vercel.app" || 'http://localhost:3001';
+    console.log('Connecting to server:', serverUrl);
+    
+    const newSocket = io(serverUrl, {
+      transports: ['websocket', 'polling'],
+      withCredentials: true
+    });
     setSocket(newSocket);
 
     // Socket event listeners

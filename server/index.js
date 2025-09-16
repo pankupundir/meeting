@@ -9,11 +9,16 @@ const app = express();
 const server = http.createServer(app);
 // Configure allowed origins for production and development
 const allowedOrigins = [
-  'https://meeting-sooty.vercel.app', // Your production domain
+  'https://meeting-sooty.vercel.app', // Your frontend domain
   'https://www.meeting-sooty.vercel.app', // With www
+  'http://localhost:5173', // Vite dev server
+  'http://localhost:3000', // Alternative dev port
   process.env.CLIENT_URL, // Environment variable for client URL
   process.env.FRONTEND_URL // Alternative environment variable
 ].filter(Boolean); // Remove undefined values
+
+// Log allowed origins for debugging
+console.log('Allowed CORS origins:', allowedOrigins);
 
 const io = socketIo(server, {
   cors: {

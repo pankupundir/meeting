@@ -14,7 +14,8 @@ const Home = () => {
 
   const handleCreateInstantMeeting = async () => {
     try {
-      const response = await fetch('https://meeting-sooty.vercel.app/api/meetings', {
+      const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+      const response = await fetch(`${serverUrl}/api/meetings`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
