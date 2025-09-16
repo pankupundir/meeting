@@ -14,7 +14,7 @@ const ScheduledMeetings = () => {
 
   const fetchMeetings = async () => {
     try {
-      const response = await fetch('/api/meetings');
+      const response = await fetch('https://meeting-sooty.vercel.app/api/meetings');
       const data = await response.json();
       setMeetings(data.meetings || []);
     } catch (error) {

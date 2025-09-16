@@ -60,7 +60,7 @@ const MeetingRoom = () => {
 
   useEffect(() => {
     // Initialize socket connection
-    const newSocket = io('http://localhost:3001');
+    const newSocket = io('https://meeting-sooty.vercel.app');
     setSocket(newSocket);
 
     // Socket event listeners
