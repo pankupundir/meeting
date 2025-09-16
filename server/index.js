@@ -9,8 +9,6 @@ const app = express();
 const server = http.createServer(app);
 // Configure allowed origins for production and development
 const allowedOrigins = [
-  'http://localhost:5173', // Vite dev server
-  'http://localhost:3000', // Alternative dev port
   'https://meeting-sooty.vercel.app', // Your production domain
   'https://www.meeting-sooty.vercel.app', // With www
   process.env.CLIENT_URL, // Environment variable for client URL
