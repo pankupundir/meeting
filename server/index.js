@@ -10,7 +10,15 @@ const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
     origin: "https://meeting-sooty.vercel.app",
-    methods: ["GET", "POST"]
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
+    transports: ["websocket", "polling"],
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
+    maxAge: 86400,
+    origin: "https://meeting-sooty.vercel.app"
+    
   }
 });
 
