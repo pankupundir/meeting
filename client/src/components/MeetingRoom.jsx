@@ -27,6 +27,9 @@ const MeetingRoom = () => {
   const [meeting, setMeeting] = useState(null);
   const [error, setError] = useState('');
   const [isJoining, setIsJoining] = useState(false);
+  const [isOrganizer, setIsOrganizer] = useState(false);
+  const [waitingParticipants, setWaitingParticipants] = useState([]);
+  const [isWaitingForAdmission, setIsWaitingForAdmission] = useState(false);
   
   // Media controls
   const [audioEnabled, setAudioEnabled] = useState(true);
@@ -67,7 +70,10 @@ const MeetingRoom = () => {
     newSocket.on('meeting-joined', (data) => {
       console.log('Meeting joined:', data);
       setMeeting(data.meeting);
-      setParticipants(data.participants);
+      // Filter out self from participants list to avoid duplicates
+      const otherParticipants = data.participants.filter(p => p.id !== newSocket.id);
+      setParticipants(otherParticipants);
+      setIsOrganizer(data.isOrganizer || false);
       setIsConnected(true);
       setIsJoining(false);
       setVideoLoading(false);
@@ -75,8 +81,20 @@ const MeetingRoom = () => {
 
     newSocket.on('user-joined', (participant) => {
       console.log('User joined:', participant);
-      setParticipants(prev => [...prev, participant]);
-      createPeerConnection(participant.id, true);
+      setParticipants(prev => {
+        // Check if participant already exists to avoid duplicates
+        const exists = prev.find(p => p.id === participant.id);
+        if (!exists) {
+          return [...prev, participant];
+        }
+        return prev;
+      });
+      
+      // Create peer connection with the new participant
+      // Add a small delay to ensure the participant has initialized their media
+      setTimeout(() => {
+        createPeerConnection(participant.id, true);
+      }, 1000);
     });
 
     newSocket.on('user-left', (data) => {
@@ -124,12 +142,65 @@ const MeetingRoom = () => {
       setError(data.message);
     });
 
+    // Waiting room events
+    newSocket.on('participant-waiting', (participant) => {
+      console.log('Participant waiting:', participant);
+      setWaitingParticipants(prev => [...prev, participant]);
+    });
+
+    newSocket.on('waiting-for-admission', (data) => {
+      console.log('Waiting for admission:', data);
+      setIsWaitingForAdmission(true);
+      setError(data.message);
+    });
+
+    newSocket.on('admitted-to-meeting', async (data) => {
+      console.log('Admitted to meeting:', data);
+      setMeeting(data.meeting);
+      // Filter out self from participants list to avoid duplicates
+      const otherParticipants = data.participants.filter(p => p.id !== newSocket.id);
+      setParticipants(otherParticipants);
+      setIsWaitingForAdmission(false);
+      setError('');
+      setIsConnected(true);
+      setIsJoining(false);
+      setVideoLoading(false);
+      
+      // Initialize media for admitted participant
+      try {
+        await initializeMedia();
+        console.log('Media initialized for admitted participant');
+        
+        // Now that media is ready, create peer connections with existing participants
+        otherParticipants.forEach(participant => {
+          setTimeout(() => {
+            createPeerConnection(participant.id, true);
+          }, 100);
+        });
+      } catch (error) {
+        console.error('Failed to initialize media for admitted participant:', error);
+        setError('Failed to access camera and microphone');
+      }
+    });
+
+    newSocket.on('denied-from-meeting', (data) => {
+      console.log('Denied from meeting:', data);
+      setError(data.message);
+      setTimeout(() => {
+        navigate('/');
+      }, 3000);
+    });
+
+
     return () => {
       newSocket.close();
     };
   }, [meetingId]);
 
   const createPeerConnection = async (userId, isInitiator) => {
+    console.log(`Creating peer connection with ${userId}, isInitiator: ${isInitiator}`);
+    console.log('Local stream available:', !!localStreamRef.current);
+    
     const peerConnection = new RTCPeerConnection(iceServers);
     peerConnectionsRef.current[userId] = peerConnection;
 
@@ -137,7 +208,10 @@ const MeetingRoom = () => {
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
         peerConnection.addTrack(track, localStreamRef.current);
+        console.log(`Added ${track.kind} track to peer connection with ${userId}`);
       });
+    } else {
+      console.warn('No local stream available when creating peer connection with', userId);
     }
 
     // Handle remote stream
@@ -165,11 +239,14 @@ const MeetingRoom = () => {
     // Handle ICE candidates
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        socket.emit('ice-candidate', {
-          meetingId,
-          candidate: event.candidate,
-          target: userId
-        });
+        // Use the socket from state instead of the local variable
+        if (socket) {
+          socket.emit('ice-candidate', {
+            meetingId,
+            candidate: event.candidate,
+            target: userId
+          });
+        }
       }
     };
 
@@ -178,11 +255,13 @@ const MeetingRoom = () => {
       try {
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
-        socket.emit('offer', {
-          meetingId,
-          offer,
-          target: userId
-        });
+        if (socket) {
+          socket.emit('offer', {
+            meetingId,
+            offer,
+            target: userId
+          });
+        }
       } catch (error) {
         console.error('Error creating offer:', error);
       }
@@ -225,11 +304,13 @@ const MeetingRoom = () => {
     // Handle ICE candidates
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        socket.emit('ice-candidate', {
-          meetingId,
-          candidate: event.candidate,
-          target: from
-        });
+        if (socket) {
+          socket.emit('ice-candidate', {
+            meetingId,
+            candidate: event.candidate,
+            target: from
+          });
+        }
       }
     };
 
@@ -237,11 +318,13 @@ const MeetingRoom = () => {
       await peerConnection.setRemoteDescription(offer);
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
-      socket.emit('answer', {
-        meetingId,
-        answer,
-        target: from
-      });
+      if (socket) {
+        socket.emit('answer', {
+          meetingId,
+          answer,
+          target: from
+        });
+      }
     } catch (error) {
       console.error('Error handling offer:', error);
     }
@@ -355,10 +438,13 @@ const MeetingRoom = () => {
       console.log('Media initialized, joining meeting...');
       
       // Join the meeting room
-      socket.emit('join-meeting', {
-        meetingId,
-        userName: userName.trim()
-      });
+      if (socket) {
+        socket.emit('join-meeting', {
+          meetingId,
+          userName: userName.trim(),
+          isOrganizer: false // Will be determined by server based on if first to join
+        });
+      }
       
       console.log('Join meeting request sent');
     } catch (error) {
@@ -377,10 +463,12 @@ const MeetingRoom = () => {
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled;
         setAudioEnabled(audioTrack.enabled);
-        socket.emit('toggle-audio', {
-          meetingId,
-          audioEnabled: audioTrack.enabled
-        });
+        if (socket) {
+          socket.emit('toggle-audio', {
+            meetingId,
+            audioEnabled: audioTrack.enabled
+          });
+        }
       }
     }
   };
@@ -391,10 +479,12 @@ const MeetingRoom = () => {
       if (videoTrack) {
         videoTrack.enabled = !videoTrack.enabled;
         setVideoEnabled(videoTrack.enabled);
-        socket.emit('toggle-video', {
-          meetingId,
-          videoEnabled: videoTrack.enabled
-        });
+        if (socket) {
+          socket.emit('toggle-video', {
+            meetingId,
+            videoEnabled: videoTrack.enabled
+          });
+        }
       }
     }
   };
@@ -452,10 +542,12 @@ const MeetingRoom = () => {
         setScreenSharing(false);
       }
       
-      socket.emit('toggle-screen-share', {
-        meetingId,
-        screenSharing: !screenSharing
-      });
+      if (socket) {
+        socket.emit('toggle-screen-share', {
+          meetingId,
+          screenSharing: !screenSharing
+        });
+      }
     } catch (error) {
       console.error('Error toggling screen share:', error);
     }
@@ -480,6 +572,54 @@ const MeetingRoom = () => {
     const meetingLink = `${window.location.origin}/meeting/${meetingId}`;
     navigator.clipboard.writeText(meetingLink);
   };
+
+  const admitParticipant = (participantId) => {
+    if (socket) {
+      socket.emit('admit-participant', {
+        meetingId,
+        participantId
+      });
+    }
+    setWaitingParticipants(prev => prev.filter(p => p.id !== participantId));
+  };
+
+  const denyParticipant = (participantId) => {
+    if (socket) {
+      socket.emit('deny-participant', {
+        meetingId,
+        participantId
+      });
+    }
+    setWaitingParticipants(prev => prev.filter(p => p.id !== participantId));
+  };
+
+  // Show waiting room if waiting for admission
+  if (isWaitingForAdmission) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-yellow-50 to-orange-100 flex items-center justify-center p-4">
+        <div className="card max-w-md w-full text-center">
+          <div className="w-16 h-16 bg-yellow-100 rounded-full flex items-center justify-center mx-auto mb-6">
+            <Users className="w-8 h-8 text-yellow-600" />
+          </div>
+          <h1 className="text-2xl font-bold mb-4">Waiting for Admission</h1>
+          <p className="text-gray-600 mb-6">
+            You're waiting for the organizer to admit you to the meeting.
+          </p>
+          
+          {error && (
+            <div className="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded mb-4">
+              {error}
+            </div>
+          )}
+          
+          <div className="animate-pulse">
+            <div className="w-8 h-8 bg-yellow-300 rounded-full mx-auto mb-4"></div>
+            <p className="text-sm text-gray-500">Please wait...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Show name input if not connected
   if (!isConnected) {
@@ -544,7 +684,12 @@ const MeetingRoom = () => {
         <div className="flex items-center gap-4">
           <div className="flex items-center text-sm text-gray-300">
             <Users className="w-4 h-4 mr-1" />
-            {participants.length} participants
+            {participants.length + 1} participants
+            {isOrganizer && waitingParticipants.length > 0 && (
+              <span className="ml-2 bg-yellow-500 text-black px-2 py-1 rounded-full text-xs">
+                {waitingParticipants.length} waiting
+              </span>
+            )}
           </div>
           
           <button
@@ -556,6 +701,49 @@ const MeetingRoom = () => {
           </button>
         </div>
       </div>
+
+      {/* Waiting Participants Panel (Organizer Only) */}
+      {isOrganizer && waitingParticipants.length > 0 && (
+        <div className="bg-yellow-900 border-b border-yellow-700 p-4">
+          <h3 className="text-lg font-semibold mb-3 flex items-center">
+            <Users className="w-5 h-5 mr-2" />
+            Participants Waiting for Admission ({waitingParticipants.length})
+          </h3>
+          <div className="space-y-2">
+            {waitingParticipants.map((participant) => (
+              <div key={participant.id} className="flex items-center justify-between bg-yellow-800 rounded-lg p-3">
+                <div className="flex items-center">
+                  <div className="w-8 h-8 bg-yellow-600 rounded-full flex items-center justify-center mr-3">
+                    <span className="text-sm font-medium">
+                      {participant.name.charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                  <div>
+                    <p className="font-medium">{participant.name}</p>
+                    <p className="text-xs text-yellow-300">
+                      Waiting since {new Date(participant.joinedAt).toLocaleTimeString()}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => admitParticipant(participant.id)}
+                    className="bg-green-600 hover:bg-green-500 px-4 py-2 rounded-lg text-sm font-medium"
+                  >
+                    Admit
+                  </button>
+                  <button
+                    onClick={() => denyParticipant(participant.id)}
+                    className="bg-red-600 hover:bg-red-500 px-4 py-2 rounded-lg text-sm font-medium"
+                  >
+                    Deny
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Video Grid */}
       <div className="flex-1 p-4">
@@ -623,6 +811,7 @@ const MeetingRoom = () => {
                   <video
                     ref={(el) => {
                       remoteVideosRef.current[participant.id] = el;
+                      console.log(`Video element created for participant: ${participant.name} (${participant.id})`);
                     }}
                     autoPlay
                     playsInline
@@ -696,6 +885,7 @@ const MeetingRoom = () => {
                   <video
                     ref={(el) => {
                       remoteVideosRef.current[participants[0].id] = el;
+                      console.log(`Video element created for participant: ${participants[0].name} (${participants[0].id})`);
                     }}
                     autoPlay
                     playsInline
@@ -745,6 +935,7 @@ const MeetingRoom = () => {
                     <video
                       ref={(el) => {
                         remoteVideosRef.current[participant.id] = el;
+                        console.log(`Video element created for participant: ${participant.name} (${participant.id})`);
                       }}
                       autoPlay
                       playsInline
