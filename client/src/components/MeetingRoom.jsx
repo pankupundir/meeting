@@ -27,16 +27,16 @@ const MeetingRoom = () => {
   const [meeting, setMeeting] = useState(null);
   const [error, setError] = useState('');
   const [isJoining, setIsJoining] = useState(false);
-  const [isOrganizer, setIsOrganizer] = useState(false);
-  const [waitingParticipants, setWaitingParticipants] = useState([]);
-  const [isWaitingForAdmission, setIsWaitingForAdmission] = useState(false);
+  // Removed organizer and waiting room functionality
   
   // Media controls
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [videoEnabled, setVideoEnabled] = useState(true);
   const [screenSharing, setScreenSharing] = useState(false);
+  const [screenSharingUser, setScreenSharingUser] = useState(null); // Track who is sharing screen
   const [focusedVideo, setFocusedVideo] = useState(null); // For focusing on a specific video
   const [videoLoading, setVideoLoading] = useState(false); // Track video loading state
+  const [forceRender, setForceRender] = useState(0); // Force re-render for video elements
   
   // WebRTC refs
   const localVideoRef = useRef(null);
@@ -56,10 +56,101 @@ const MeetingRoom = () => {
   // Effect to ensure video stream is set when component mounts
   useEffect(() => {
     if (localStreamRef.current && localVideoRef.current) {
+      console.log('Setting local video stream');
       localVideoRef.current.srcObject = localStreamRef.current;
       localVideoRef.current.play().catch(e => console.log('Video play failed on mount:', e));
+    } else {
+      console.warn('Local video setup failed:', {
+        hasStream: !!localStreamRef.current,
+        hasVideoElement: !!localVideoRef.current
+      });
     }
   }, [isConnected]);
+
+  // Additional effect to ensure local video is set when stream becomes available
+  useEffect(() => {
+    if (localStreamRef.current && localVideoRef.current && !localVideoRef.current.srcObject) {
+      console.log('Setting local video stream (delayed)');
+      localVideoRef.current.srcObject = localStreamRef.current;
+      localVideoRef.current.play().catch(e => console.log('Video play failed (delayed):', e));
+    }
+  }, [localStreamRef.current, localVideoRef.current]);
+
+  // Function to ensure video element is ready and set stream
+  const ensureVideoElementReady = (userId, stream) => {
+    const videoElement = remoteVideosRef.current[userId];
+    console.log(`ensureVideoElementReady called for ${userId}:`, {
+      videoElement: !!videoElement,
+      stream: !!stream,
+      streamTracks: stream ? stream.getTracks().length : 0
+    });
+    
+    if (videoElement && stream) {
+      videoElement.srcObject = stream;
+      videoElement.play().catch(e => console.log('Video play failed:', e));
+      console.log(`Video element ready and stream set for: ${userId}`);
+      return true;
+    } else {
+      console.warn(`Cannot set stream for ${userId}:`, {
+        videoElement: !!videoElement,
+        stream: !!stream
+      });
+    }
+    return false;
+  };
+
+  // Debug function to check video state
+  const debugVideoState = () => {
+    console.log('=== VIDEO STATE DEBUG ===');
+    console.log('Participants:', participants.map(p => ({ id: p.id, name: p.name })));
+    console.log('Peer connections:', Object.keys(peerConnectionsRef.current));
+    console.log('Video elements:', Object.keys(remoteVideosRef.current));
+    
+    participants.forEach(participant => {
+      const peerConnection = peerConnectionsRef.current[participant.id];
+      const videoElement = remoteVideosRef.current[participant.id];
+      console.log(`Participant ${participant.name} (${participant.id}):`, {
+        hasPeerConnection: !!peerConnection,
+        hasRemoteStream: !!peerConnection?.remoteStream,
+        hasVideoElement: !!videoElement,
+        videoSrcObject: !!videoElement?.srcObject,
+        videoReadyState: videoElement?.readyState,
+        connectionState: peerConnection?.connectionState
+      });
+    });
+    console.log('=== END DEBUG ===');
+  };
+
+  // Effect to handle delayed stream assignment when video elements become available
+  useEffect(() => {
+    // Check if we have any pending streams that need to be assigned
+    Object.entries(peerConnectionsRef.current).forEach(([userId, peerConnection]) => {
+      if (peerConnection.remoteStream && !remoteVideosRef.current[userId]?.srcObject) {
+        console.log(`Attempting to assign pending stream for: ${userId}`);
+        ensureVideoElementReady(userId, peerConnection.remoteStream);
+      }
+    });
+    
+    // Debug video state
+    debugVideoState();
+  }, [forceRender, participants.length]);
+
+  // Additional effect to periodically check and fix video streams
+  useEffect(() => {
+    const interval = setInterval(() => {
+      participants.forEach(participant => {
+        const peerConnection = peerConnectionsRef.current[participant.id];
+        const videoElement = remoteVideosRef.current[participant.id];
+        
+        if (peerConnection?.remoteStream && videoElement && !videoElement.srcObject) {
+          console.log(`Fixing missing stream for ${participant.name}`);
+          ensureVideoElementReady(participant.id, peerConnection.remoteStream);
+        }
+      });
+    }, 2000); // Check every 2 seconds
+    
+    return () => clearInterval(interval);
+  }, [participants]);
 
   useEffect(() => {
     // Initialize socket connection
@@ -73,10 +164,20 @@ const MeetingRoom = () => {
       // Filter out self from participants list to avoid duplicates
       const otherParticipants = data.participants.filter(p => p.id !== newSocket.id);
       setParticipants(otherParticipants);
-      setIsOrganizer(data.isOrganizer || false);
       setIsConnected(true);
       setIsJoining(false);
       setVideoLoading(false);
+      
+      // Create peer connections with existing participants
+      // Add delay to ensure media is initialized and video elements are created
+      setTimeout(() => {
+        otherParticipants.forEach(participant => {
+          // Only initiate connection if our socket ID is smaller (to avoid duplicate connections)
+          const shouldInitiate = newSocket.id < participant.id;
+          console.log(`Creating peer connection with existing participant: ${participant.name}, shouldInitiate: ${shouldInitiate}`);
+          createPeerConnection(participant.id, shouldInitiate);
+        });
+      }, 1000); // Delay to ensure everything is ready
     });
 
     newSocket.on('user-joined', (participant) => {
@@ -85,6 +186,8 @@ const MeetingRoom = () => {
         // Check if participant already exists to avoid duplicates
         const exists = prev.find(p => p.id === participant.id);
         if (!exists) {
+          // Force re-render to ensure video elements are created
+          setForceRender(prev => prev + 1);
           return [...prev, participant];
         }
         return prev;
@@ -93,8 +196,11 @@ const MeetingRoom = () => {
       // Create peer connection with the new participant
       // Add a small delay to ensure the participant has initialized their media
       setTimeout(() => {
-        createPeerConnection(participant.id, true);
-      }, 1000);
+        // Only initiate connection if our socket ID is smaller (to avoid duplicate connections)
+        const shouldInitiate = newSocket.id < participant.id;
+        console.log(`Creating peer connection with new participant: ${participant.name}, shouldInitiate: ${shouldInitiate}`);
+        createPeerConnection(participant.id, shouldInitiate);
+      }, 500); // Reduced delay since new participant will also create connections
     });
 
     newSocket.on('user-left', (data) => {
@@ -109,16 +215,29 @@ const MeetingRoom = () => {
 
     newSocket.on('offer', async (data) => {
       console.log('Received offer from:', data.from);
+      console.log('Offer details:', {
+        type: data.offer.type,
+        sdp: data.offer.sdp ? data.offer.sdp.substring(0, 100) + '...' : 'no sdp'
+      });
       await handleOffer(data.offer, data.from);
     });
 
     newSocket.on('answer', async (data) => {
       console.log('Received answer from:', data.from);
+      console.log('Answer details:', {
+        type: data.answer.type,
+        sdp: data.answer.sdp ? data.answer.sdp.substring(0, 100) + '...' : 'no sdp'
+      });
       await handleAnswer(data.answer, data.from);
     });
 
     newSocket.on('ice-candidate', async (data) => {
       console.log('Received ICE candidate from:', data.from);
+      console.log('ICE candidate details:', {
+        candidate: data.candidate.candidate,
+        sdpMLineIndex: data.candidate.sdpMLineIndex,
+        sdpMid: data.candidate.sdpMid
+      });
       await handleIceCandidate(data.candidate, data.from);
     });
 
@@ -142,53 +261,19 @@ const MeetingRoom = () => {
       setError(data.message);
     });
 
-    // Waiting room events
-    newSocket.on('participant-waiting', (participant) => {
-      console.log('Participant waiting:', participant);
-      setWaitingParticipants(prev => [...prev, participant]);
-    });
+    // Removed waiting room events - participants join directly
 
-    newSocket.on('waiting-for-admission', (data) => {
-      console.log('Waiting for admission:', data);
-      setIsWaitingForAdmission(true);
-      setError(data.message);
-    });
-
-    newSocket.on('admitted-to-meeting', async (data) => {
-      console.log('Admitted to meeting:', data);
-      setMeeting(data.meeting);
-      // Filter out self from participants list to avoid duplicates
-      const otherParticipants = data.participants.filter(p => p.id !== newSocket.id);
-      setParticipants(otherParticipants);
-      setIsWaitingForAdmission(false);
-      setError('');
-      setIsConnected(true);
-      setIsJoining(false);
-      setVideoLoading(false);
-      
-      // Initialize media for admitted participant
-      try {
-        await initializeMedia();
-        console.log('Media initialized for admitted participant');
-        
-        // Now that media is ready, create peer connections with existing participants
-        otherParticipants.forEach(participant => {
-          setTimeout(() => {
-            createPeerConnection(participant.id, true);
-          }, 100);
-        });
-      } catch (error) {
-        console.error('Failed to initialize media for admitted participant:', error);
-        setError('Failed to access camera and microphone');
+    newSocket.on('user-screen-share-toggled', (data) => {
+      console.log('Screen share toggled by:', data.userId, 'sharing:', data.screenSharing);
+      if (data.screenSharing) {
+        setScreenSharingUser(data.userId);
+      } else {
+        setScreenSharingUser(null);
+        // If the current user was sharing and stopped, also clear local state
+        if (data.userId === newSocket.id) {
+          setScreenSharing(false);
+        }
       }
-    });
-
-    newSocket.on('denied-from-meeting', (data) => {
-      console.log('Denied from meeting:', data);
-      setError(data.message);
-      setTimeout(() => {
-        navigate('/');
-      }, 3000);
     });
 
 
@@ -201,11 +286,22 @@ const MeetingRoom = () => {
     console.log(`Creating peer connection with ${userId}, isInitiator: ${isInitiator}`);
     console.log('Local stream available:', !!localStreamRef.current);
     
+    // Check if we already have a peer connection with this user
+    if (peerConnectionsRef.current[userId]) {
+      console.log(`Peer connection already exists with ${userId}, skipping creation`);
+      return; // Don't create duplicate connections
+    }
+    
     const peerConnection = new RTCPeerConnection(iceServers);
     peerConnectionsRef.current[userId] = peerConnection;
 
-    // Add local stream to peer connection
+    // Add local stream to peer connection using modern WebRTC API
     if (localStreamRef.current) {
+      // Use addStream for better compatibility
+      peerConnection.addStream(localStreamRef.current);
+      console.log(`Added local stream to peer connection with ${userId}`);
+      
+      // Also add tracks individually for modern browsers
       localStreamRef.current.getTracks().forEach(track => {
         peerConnection.addTrack(track, localStreamRef.current);
         console.log(`Added ${track.kind} track to peer connection with ${userId}`);
@@ -214,31 +310,75 @@ const MeetingRoom = () => {
       console.warn('No local stream available when creating peer connection with', userId);
     }
 
-    // Handle remote stream
+    // Handle remote stream - Modern WebRTC approach
     peerConnection.ontrack = (event) => {
       console.log('Received remote stream from:', userId);
-      const remoteStream = event.streams[0];
+      console.log('Stream details:', {
+        streams: event.streams.length,
+        tracks: event.streams[0]?.getTracks().length || 0,
+        videoTracks: event.streams[0]?.getVideoTracks().length || 0,
+        audioTracks: event.streams[0]?.getAudioTracks().length || 0,
+        track: event.track ? event.track.kind : 'no track'
+      });
+      
+      // Get the stream from the event
+      const remoteStream = event.streams[0] || event.stream;
+      
+      if (!remoteStream) {
+        console.error('No remote stream found in ontrack event');
+        return;
+      }
+      
+      // Store the stream for later use if video element is not ready
+      peerConnection.remoteStream = remoteStream;
+      
+      // Create a new MediaStream with the received track
+      const mediaStream = new MediaStream();
+      mediaStream.addTrack(event.track);
+      
+      console.log(`Created MediaStream for ${userId} with track:`, event.track.kind);
+      
       const videoElement = remoteVideosRef.current[userId];
       if (videoElement) {
-        videoElement.srcObject = remoteStream;
+        console.log(`Setting stream directly for ${userId}`);
+        videoElement.srcObject = mediaStream;
         videoElement.play().catch(e => console.log('Remote video play failed:', e));
         console.log('Remote video element updated for:', userId);
       } else {
         console.warn('Remote video element not found for:', userId);
-        // Retry after a short delay
-        setTimeout(() => {
+        // Retry multiple times with increasing delays
+        let retryCount = 0;
+        const maxRetries = 15; // Increased retries
+        const retryInterval = 300; // Increased interval
+        
+        const retrySetStream = () => {
           const retryElement = remoteVideosRef.current[userId];
           if (retryElement) {
-            retryElement.srcObject = remoteStream;
+            console.log(`Setting stream on retry for ${userId}`);
+            retryElement.srcObject = mediaStream;
             retryElement.play().catch(e => console.log('Remote video play failed on retry:', e));
+            console.log('Remote video element updated on retry for:', userId);
+          } else if (retryCount < maxRetries) {
+            retryCount++;
+            console.log(`Retry ${retryCount}/${maxRetries} for ${userId}`);
+            setTimeout(retrySetStream, retryInterval * retryCount);
+          } else {
+            console.error('Failed to set remote stream after maximum retries for:', userId);
           }
-        }, 100);
+        };
+        
+        setTimeout(retrySetStream, retryInterval);
       }
     };
 
     // Handle ICE candidates
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log(`Sending ICE candidate to ${userId}:`, {
+          candidate: event.candidate.candidate,
+          sdpMLineIndex: event.candidate.sdpMLineIndex,
+          sdpMid: event.candidate.sdpMid
+        });
         // Use the socket from state instead of the local variable
         if (socket) {
           socket.emit('ice-candidate', {
@@ -247,20 +387,45 @@ const MeetingRoom = () => {
             target: userId
           });
         }
+      } else {
+        console.log(`ICE gathering complete for ${userId}`);
+      }
+    };
+
+    // Add connection state monitoring
+    peerConnection.onconnectionstatechange = () => {
+      console.log(`Connection state with ${userId}: ${peerConnection.connectionState}`);
+      if (peerConnection.connectionState === 'failed') {
+        console.error(`Connection failed with ${userId}, attempting to reconnect...`);
+        // Clean up and retry connection
+        setTimeout(() => {
+          if (peerConnectionsRef.current[userId]) {
+            peerConnectionsRef.current[userId].close();
+            delete peerConnectionsRef.current[userId];
+            createPeerConnection(userId, isInitiator);
+          }
+        }, 2000);
       }
     };
 
     // Create offer if initiator
     if (isInitiator) {
       try {
+        console.log(`Creating offer for ${userId}`);
         const offer = await peerConnection.createOffer();
+        console.log(`Offer created for ${userId}:`, {
+          type: offer.type,
+          sdp: offer.sdp ? offer.sdp.substring(0, 100) + '...' : 'no sdp'
+        });
         await peerConnection.setLocalDescription(offer);
+        console.log(`Local description set for ${userId}`);
         if (socket) {
           socket.emit('offer', {
             meetingId,
             offer,
             target: userId
           });
+          console.log(`Offer sent to ${userId}`);
         }
       } catch (error) {
         console.error('Error creating offer:', error);
@@ -269,35 +434,82 @@ const MeetingRoom = () => {
   };
 
   const handleOffer = async (offer, from) => {
+    console.log(`Handling offer from ${from}`);
     const peerConnection = new RTCPeerConnection(iceServers);
     peerConnectionsRef.current[from] = peerConnection;
 
-    // Add local stream
+    // Add local stream using modern WebRTC API
     if (localStreamRef.current) {
+      // Use addStream for better compatibility
+      peerConnection.addStream(localStreamRef.current);
+      console.log(`Added local stream to peer connection for ${from}`);
+      
+      // Also add tracks individually for modern browsers
       localStreamRef.current.getTracks().forEach(track => {
         peerConnection.addTrack(track, localStreamRef.current);
+        console.log(`Added ${track.kind} track to peer connection for ${from}`);
       });
+    } else {
+      console.warn('No local stream available when handling offer from', from);
     }
 
-    // Handle remote stream
+    // Handle remote stream - Modern WebRTC approach
     peerConnection.ontrack = (event) => {
       console.log('Received remote stream from (offer):', from);
-      const remoteStream = event.streams[0];
+      console.log('Stream details (offer):', {
+        streams: event.streams.length,
+        tracks: event.streams[0]?.getTracks().length || 0,
+        videoTracks: event.streams[0]?.getVideoTracks().length || 0,
+        audioTracks: event.streams[0]?.getAudioTracks().length || 0,
+        track: event.track ? event.track.kind : 'no track'
+      });
+      
+      // Get the stream from the event
+      const remoteStream = event.streams[0] || event.stream;
+      
+      if (!remoteStream) {
+        console.error('No remote stream found in ontrack event (offer)');
+        return;
+      }
+      
+      // Store the stream for later use if video element is not ready
+      peerConnection.remoteStream = remoteStream;
+      
+      // Create a new MediaStream with the received track
+      const mediaStream = new MediaStream();
+      mediaStream.addTrack(event.track);
+      
+      console.log(`Created MediaStream for ${from} with track:`, event.track.kind);
+      
       const videoElement = remoteVideosRef.current[from];
       if (videoElement) {
-        videoElement.srcObject = remoteStream;
+        console.log(`Setting stream directly for ${from} (offer)`);
+        videoElement.srcObject = mediaStream;
         videoElement.play().catch(e => console.log('Remote video play failed (offer):', e));
         console.log('Remote video element updated for (offer):', from);
       } else {
         console.warn('Remote video element not found for (offer):', from);
-        // Retry after a short delay
-        setTimeout(() => {
+        // Retry multiple times with increasing delays
+        let retryCount = 0;
+        const maxRetries = 10;
+        const retryInterval = 200;
+        
+        const retrySetStream = () => {
           const retryElement = remoteVideosRef.current[from];
           if (retryElement) {
-            retryElement.srcObject = remoteStream;
+            console.log(`Setting stream on retry for ${from} (offer)`);
+            retryElement.srcObject = mediaStream;
             retryElement.play().catch(e => console.log('Remote video play failed on retry (offer):', e));
+            console.log('Remote video element updated on retry (offer) for:', from);
+          } else if (retryCount < maxRetries) {
+            retryCount++;
+            setTimeout(retrySetStream, retryInterval * retryCount);
+          } else {
+            console.error('Failed to set remote stream after maximum retries (offer) for:', from);
           }
-        }, 100);
+        };
+        
+        setTimeout(retrySetStream, retryInterval);
       }
     };
 
@@ -315,15 +527,27 @@ const MeetingRoom = () => {
     };
 
     try {
+      console.log(`Setting remote description for ${from}`);
       await peerConnection.setRemoteDescription(offer);
+      console.log(`Remote description set for ${from}`);
+      
+      console.log(`Creating answer for ${from}`);
       const answer = await peerConnection.createAnswer();
+      console.log(`Answer created for ${from}:`, {
+        type: answer.type,
+        sdp: answer.sdp ? answer.sdp.substring(0, 100) + '...' : 'no sdp'
+      });
+      
       await peerConnection.setLocalDescription(answer);
+      console.log(`Local description set for ${from}`);
+      
       if (socket) {
         socket.emit('answer', {
           meetingId,
           answer,
           target: from
         });
+        console.log(`Answer sent to ${from}`);
       }
     } catch (error) {
       console.error('Error handling offer:', error);
@@ -331,24 +555,34 @@ const MeetingRoom = () => {
   };
 
   const handleAnswer = async (answer, from) => {
+    console.log(`Handling answer from ${from}`);
     const peerConnection = peerConnectionsRef.current[from];
     if (peerConnection) {
       try {
+        console.log(`Setting remote description (answer) for ${from}`);
         await peerConnection.setRemoteDescription(answer);
+        console.log(`Remote description (answer) set for ${from}`);
       } catch (error) {
         console.error('Error handling answer:', error);
       }
+    } else {
+      console.error(`No peer connection found for ${from} when handling answer`);
     }
   };
 
   const handleIceCandidate = async (candidate, from) => {
+    console.log(`Handling ICE candidate from ${from}`);
     const peerConnection = peerConnectionsRef.current[from];
     if (peerConnection) {
       try {
+        console.log(`Adding ICE candidate for ${from}`);
         await peerConnection.addIceCandidate(candidate);
+        console.log(`ICE candidate added for ${from}`);
       } catch (error) {
         console.error('Error handling ICE candidate:', error);
       }
+    } else {
+      console.error(`No peer connection found for ${from} when handling ICE candidate`);
     }
   };
 
@@ -441,8 +675,7 @@ const MeetingRoom = () => {
       if (socket) {
         socket.emit('join-meeting', {
           meetingId,
-          userName: userName.trim(),
-          isOrganizer: false // Will be determined by server based on if first to join
+          userName: userName.trim()
         });
       }
       
@@ -514,6 +747,7 @@ const MeetingRoom = () => {
         }
         
         setScreenSharing(true);
+        setScreenSharingUser(socket.id); // Set self as screen sharing user
         
         // Handle screen share end
         videoTrack.onended = () => {
@@ -540,6 +774,7 @@ const MeetingRoom = () => {
         }
         
         setScreenSharing(false);
+        setScreenSharingUser(null); // Clear screen sharing user
       }
       
       if (socket) {
@@ -573,53 +808,9 @@ const MeetingRoom = () => {
     navigator.clipboard.writeText(meetingLink);
   };
 
-  const admitParticipant = (participantId) => {
-    if (socket) {
-      socket.emit('admit-participant', {
-        meetingId,
-        participantId
-      });
-    }
-    setWaitingParticipants(prev => prev.filter(p => p.id !== participantId));
-  };
+  // Removed admission functions - participants join directly
 
-  const denyParticipant = (participantId) => {
-    if (socket) {
-      socket.emit('deny-participant', {
-        meetingId,
-        participantId
-      });
-    }
-    setWaitingParticipants(prev => prev.filter(p => p.id !== participantId));
-  };
-
-  // Show waiting room if waiting for admission
-  if (isWaitingForAdmission) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-yellow-50 to-orange-100 flex items-center justify-center p-4">
-        <div className="card max-w-md w-full text-center">
-          <div className="w-16 h-16 bg-yellow-100 rounded-full flex items-center justify-center mx-auto mb-6">
-            <Users className="w-8 h-8 text-yellow-600" />
-          </div>
-          <h1 className="text-2xl font-bold mb-4">Waiting for Admission</h1>
-          <p className="text-gray-600 mb-6">
-            You're waiting for the organizer to admit you to the meeting.
-          </p>
-          
-          {error && (
-            <div className="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded mb-4">
-              {error}
-            </div>
-          )}
-          
-          <div className="animate-pulse">
-            <div className="w-8 h-8 bg-yellow-300 rounded-full mx-auto mb-4"></div>
-            <p className="text-sm text-gray-500">Please wait...</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // Removed waiting room UI - participants join directly
 
   // Show name input if not connected
   if (!isConnected) {
@@ -685,11 +876,6 @@ const MeetingRoom = () => {
           <div className="flex items-center text-sm text-gray-300">
             <Users className="w-4 h-4 mr-1" />
             {participants.length + 1} participants
-            {isOrganizer && waitingParticipants.length > 0 && (
-              <span className="ml-2 bg-yellow-500 text-black px-2 py-1 rounded-full text-xs">
-                {waitingParticipants.length} waiting
-              </span>
-            )}
           </div>
           
           <button
@@ -699,55 +885,101 @@ const MeetingRoom = () => {
             <Copy className="w-4 h-4" />
             Copy Link
           </button>
+          
+          <button
+            onClick={debugVideoState}
+            className="btn btn-secondary text-sm"
+            title="Debug video state"
+          >
+            Debug
+          </button>
         </div>
       </div>
 
-      {/* Waiting Participants Panel (Organizer Only) */}
-      {isOrganizer && waitingParticipants.length > 0 && (
-        <div className="bg-yellow-900 border-b border-yellow-700 p-4">
-          <h3 className="text-lg font-semibold mb-3 flex items-center">
-            <Users className="w-5 h-5 mr-2" />
-            Participants Waiting for Admission ({waitingParticipants.length})
-          </h3>
-          <div className="space-y-2">
-            {waitingParticipants.map((participant) => (
-              <div key={participant.id} className="flex items-center justify-between bg-yellow-800 rounded-lg p-3">
-                <div className="flex items-center">
-                  <div className="w-8 h-8 bg-yellow-600 rounded-full flex items-center justify-center mr-3">
-                    <span className="text-sm font-medium">
-                      {participant.name.charAt(0).toUpperCase()}
-                    </span>
-                  </div>
-                  <div>
-                    <p className="font-medium">{participant.name}</p>
-                    <p className="text-xs text-yellow-300">
-                      Waiting since {new Date(participant.joinedAt).toLocaleTimeString()}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => admitParticipant(participant.id)}
-                    className="bg-green-600 hover:bg-green-500 px-4 py-2 rounded-lg text-sm font-medium"
-                  >
-                    Admit
-                  </button>
-                  <button
-                    onClick={() => denyParticipant(participant.id)}
-                    className="bg-red-600 hover:bg-red-500 px-4 py-2 rounded-lg text-sm font-medium"
-                  >
-                    Deny
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Removed waiting participants panel - participants join directly */}
 
       {/* Video Grid */}
       <div className="flex-1 p-4">
-        {focusedVideo ? (
+        {screenSharingUser ? (
+          // Screen sharing view - show only the screen share
+          <div className="h-full flex flex-col">
+            <div className="flex-1 relative bg-gray-800 rounded-lg overflow-hidden mb-4">
+              {screenSharingUser === socket.id ? (
+                // Local screen share
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="w-full h-full object-contain bg-black"
+                />
+              ) : (
+                // Remote screen share
+                <video
+                  ref={(el) => {
+                    if (el) {
+                      remoteVideosRef.current[screenSharingUser] = el;
+                      
+                      // If we already have a stream for this participant, set it immediately
+                      if (peerConnectionsRef.current[screenSharingUser]?.remoteStream) {
+                        console.log(`Setting up screen share video element for ${screenSharingUser} with existing stream`);
+                        ensureVideoElementReady(screenSharingUser, peerConnectionsRef.current[screenSharingUser].remoteStream);
+                      }
+                    }
+                  }}
+                  autoPlay
+                  playsInline
+                  className="w-full h-full object-contain bg-black"
+                />
+              )}
+              <div className="absolute bottom-4 left-4 bg-black bg-opacity-70 px-4 py-2 rounded-lg text-lg font-medium">
+                {screenSharingUser === socket.id ? 'You are sharing your screen' : 
+                 `${participants.find(p => p.id === screenSharingUser)?.name || 'Someone'} is sharing their screen`}
+              </div>
+            </div>
+            
+            {/* Thumbnail strip for other participants */}
+            <div className="flex gap-2 overflow-x-auto pb-2">
+              {/* Local video thumbnail (if not sharing) */}
+              {screenSharingUser !== socket.id && (
+                <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video min-w-[120px]">
+                  <video
+                    ref={localVideoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute bottom-1 left-1 bg-black bg-opacity-50 px-1 py-0.5 rounded text-xs">
+                    You
+                  </div>
+                </div>
+              )}
+              
+              {/* Remote video thumbnails (excluding screen sharer) */}
+              {participants
+                .filter(p => p.id !== screenSharingUser)
+                .map((participant) => (
+                <div 
+                  key={participant.id}
+                  className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video min-w-[120px]"
+                >
+                  <video
+                    ref={(el) => {
+                      remoteVideosRef.current[participant.id] = el;
+                    }}
+                    autoPlay
+                    playsInline
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute bottom-1 left-1 bg-black bg-opacity-50 px-1 py-0.5 rounded text-xs">
+                    {participant.name}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : focusedVideo ? (
           // Focused view - single large video
           <div className="h-full flex flex-col">
             <div className="flex-1 relative bg-gray-800 rounded-lg overflow-hidden mb-4">
@@ -762,7 +994,15 @@ const MeetingRoom = () => {
               ) : (
                 <video
                   ref={(el) => {
-                    remoteVideosRef.current[focusedVideo] = el;
+                    if (el) {
+                      remoteVideosRef.current[focusedVideo] = el;
+                      
+                      // If we already have a stream for this participant, set it immediately
+                      if (peerConnectionsRef.current[focusedVideo]?.remoteStream) {
+                        console.log(`Setting up focused video element for ${focusedVideo} with existing stream`);
+                        ensureVideoElementReady(focusedVideo, peerConnectionsRef.current[focusedVideo].remoteStream);
+                      }
+                    }
                   }}
                   autoPlay
                   playsInline
@@ -810,8 +1050,16 @@ const MeetingRoom = () => {
                 >
                   <video
                     ref={(el) => {
-                      remoteVideosRef.current[participant.id] = el;
-                      console.log(`Video element created for participant: ${participant.name} (${participant.id})`);
+                      if (el) {
+                        remoteVideosRef.current[participant.id] = el;
+                        console.log(`Video element created for participant: ${participant.name} (${participant.id})`);
+                        
+                        // If we already have a stream for this participant, set it immediately
+                        if (peerConnectionsRef.current[participant.id]?.remoteStream) {
+                          console.log(`Setting up video element for ${participant.name} with existing stream`);
+                          ensureVideoElementReady(participant.id, peerConnectionsRef.current[participant.id].remoteStream);
+                        }
+                      }
                     }}
                     autoPlay
                     playsInline
@@ -883,14 +1131,33 @@ const MeetingRoom = () => {
                 </div>
                 <div className="flex-1 relative bg-gray-800 rounded-lg overflow-hidden">
                   <video
-                    ref={(el) => {
-                      remoteVideosRef.current[participants[0].id] = el;
-                      console.log(`Video element created for participant: ${participants[0].name} (${participants[0].id})`);
-                    }}
+                    key={`video-${participants[0].id}-${forceRender}`}
+                      ref={(el) => {
+                        if (el) {
+                          remoteVideosRef.current[participants[0].id] = el;
+                          console.log(`Video element created for participant: ${participants[0].name} (${participants[0].id})`);
+                          console.log(`Video element details:`, {
+                            element: !!el,
+                            srcObject: !!el.srcObject,
+                            readyState: el.readyState,
+                            hasPeerConnection: !!peerConnectionsRef.current[participants[0].id],
+                            hasRemoteStream: !!peerConnectionsRef.current[participants[0].id]?.remoteStream
+                          });
+                          
+                          // If we already have a stream for this participant, set it immediately
+                          if (peerConnectionsRef.current[participants[0].id]?.remoteStream) {
+                            console.log(`Setting up video element for ${participants[0].name} with existing stream`);
+                            ensureVideoElementReady(participants[0].id, peerConnectionsRef.current[participants[0].id].remoteStream);
+                          }
+                        }
+                      }}
                     autoPlay
                     playsInline
                     controls={false}
                     className="w-full h-full object-cover"
+                    onLoadedData={() => {
+                      console.log(`Video loaded for participant: ${participants[0].name}`);
+                    }}
                     onError={(e) => console.error('Remote video error:', e)}
                   />
                   <div className="absolute bottom-4 left-4 bg-black bg-opacity-70 px-4 py-2 rounded-lg text-lg font-medium">
@@ -931,15 +1198,31 @@ const MeetingRoom = () => {
 
                 {/* Remote Videos */}
                 {participants.map((participant) => (
-                  <div key={participant.id} className="relative bg-gray-800 rounded-lg overflow-hidden">
+                  <div key={`${participant.id}-${forceRender}`} className="relative bg-gray-800 rounded-lg overflow-hidden">
                     <video
+                      key={`video-${participant.id}-${forceRender}`}
                       ref={(el) => {
-                        remoteVideosRef.current[participant.id] = el;
-                        console.log(`Video element created for participant: ${participant.name} (${participant.id})`);
+                        if (el) {
+                          remoteVideosRef.current[participant.id] = el;
+                          console.log(`Video element created for participant: ${participant.name} (${participant.id})`);
+                          
+                          // If we already have a stream for this participant, set it immediately
+                          const existingStream = el.srcObject;
+                          if (!existingStream && peerConnectionsRef.current[participant.id]?.remoteStream) {
+                            console.log(`Setting up video element for ${participant.name} with existing stream`);
+                            ensureVideoElementReady(participant.id, peerConnectionsRef.current[participant.id].remoteStream);
+                          }
+                        }
                       }}
                       autoPlay
                       playsInline
                       className="w-full h-full object-cover"
+                      onLoadedData={() => {
+                        console.log(`Video loaded for participant: ${participant.name}`);
+                      }}
+                      onError={(e) => {
+                        console.error(`Video error for ${participant.name}:`, e);
+                      }}
                     />
                     <div className="absolute bottom-3 left-3 bg-black bg-opacity-70 px-3 py-1.5 rounded-lg text-sm font-medium">
                       {participant.name}

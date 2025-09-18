@@ -27,8 +27,7 @@ app.use(express.json());
 const activeMeetings = new Map();
 const scheduledMeetings = new Map();
 
-// Store waiting room participants
-const waitingRoom = new Map(); // meetingId -> [participants]
+// Removed waiting room functionality - participants join directly
 
 // Clean up expired meetings every hour
 cron.schedule('0 * * * *', () => {
@@ -116,44 +115,27 @@ io.on('connection', (socket) => {
       isOrganizer
     };
 
-    // If first participant, they become the organizer
-    const isFirstParticipant = meeting.participants.length === 0;
-    if (isFirstParticipant) {
-      participant.isOrganizer = true;
-      meeting.participants.push(participant);
-      
-      // Move from scheduled to active if it's time
-      if (!meeting.isInstant && scheduledMeetings.has(meetingId)) {
-        scheduledMeetings.delete(meetingId);
-        activeMeetings.set(meetingId, meeting);
-      }
-
-      // Send current participants to the new user (excluding the current user)
-      const otherParticipants = meeting.participants.filter(p => p.id !== socket.id);
-      socket.emit('meeting-joined', {
-        meeting,
-        participants: otherParticipants,
-        isOrganizer: true
-      });
-
-      console.log(`${userName} joined meeting ${meetingId} as organizer`);
-    } else {
-      // Add to waiting room
-      if (!waitingRoom.has(meetingId)) {
-        waitingRoom.set(meetingId, []);
-      }
-      waitingRoom.get(meetingId).push(participant);
-      
-      // Notify organizer about waiting participant
-      socket.to(meetingId).emit('participant-waiting', participant);
-      
-      // Send waiting room status to the participant
-      socket.emit('waiting-for-admission', {
-        message: 'Waiting for organizer to admit you to the meeting'
-      });
-
-      console.log(`${userName} is waiting for admission to meeting ${meetingId}`);
+    // Add participant directly to meeting
+    meeting.participants.push(participant);
+    
+    // Move from scheduled to active if it's time
+    if (!meeting.isInstant && scheduledMeetings.has(meetingId)) {
+      scheduledMeetings.delete(meetingId);
+      activeMeetings.set(meetingId, meeting);
     }
+
+    // Send current participants to the new user (excluding the current user)
+    const otherParticipants = meeting.participants.filter(p => p.id !== socket.id);
+    socket.emit('meeting-joined', {
+      meeting,
+      participants: otherParticipants,
+      isOrganizer: false // No organizer concept anymore
+    });
+
+    // Notify others in the room about the new participant
+    socket.to(meetingId).emit('user-joined', participant);
+
+    console.log(`${userName} joined meeting ${meetingId}`);
   });
 
   // WebRTC signaling
@@ -202,53 +184,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle admission control
-  socket.on('admit-participant', (data) => {
-    const { meetingId, participantId } = data;
-    const meeting = activeMeetings.get(meetingId) || scheduledMeetings.get(meetingId);
-    const waitingParticipants = waitingRoom.get(meetingId) || [];
-    
-    if (!meeting || !waitingParticipants.length) return;
-    
-    const participantIndex = waitingParticipants.findIndex(p => p.id === participantId);
-    if (participantIndex === -1) return;
-    
-    const participant = waitingParticipants[participantIndex];
-    waitingParticipants.splice(participantIndex, 1);
-    
-    // Add to meeting
-    meeting.participants.push(participant);
-    
-    // Notify the admitted participant
-    socket.to(participantId).emit('admitted-to-meeting', {
-      meeting,
-      participants: meeting.participants.filter(p => p.id !== participantId)
-    });
-    
-    // Notify others in the room about the new participant
-    socket.to(meetingId).emit('user-joined', participant);
-    
-    
-    console.log(`Participant ${participant.name} admitted to meeting ${meetingId}`);
-  });
-
-  socket.on('deny-participant', (data) => {
-    const { meetingId, participantId } = data;
-    const waitingParticipants = waitingRoom.get(meetingId) || [];
-    
-    const participantIndex = waitingParticipants.findIndex(p => p.id === participantId);
-    if (participantIndex === -1) return;
-    
-    const participant = waitingParticipants[participantIndex];
-    waitingParticipants.splice(participantIndex, 1);
-    
-    // Notify the denied participant
-    socket.to(participantId).emit('denied-from-meeting', {
-      message: 'You were denied access to the meeting'
-    });
-    
-    console.log(`Participant ${participant.name} denied from meeting ${meetingId}`);
-  });
+  // Removed admission control - participants join directly
 
   // Handle user actions
   socket.on('toggle-audio', (data) => {
